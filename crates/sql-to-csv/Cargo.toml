@@ -1,0 +1,14 @@
+[package]
+name = "sql-to-csv"
+version = "0.1.0"
+edition = "2021"
+description = "Fast, parallel SQL dump to CSV/TSV converter. Supports MySQL, PostgreSQL, SQL Server, Oracle, and SQLite."
+license = "MIT"
+repository = "https://github.com/bmamouri/sql-to-csv"
+homepage = "https://github.com/bmamouri/sql-to-csv"
+keywords = ["sql", "csv", "postgresql", "mysql", "migration"]
+categories = ["command-line-utilities", "database"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libsqlconv = { path = "../libsqlconv" }

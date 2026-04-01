@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/sql-to-csv", "crates/libsqlconv", "crates/sql-to-csv-xtask"]
+resolver = "2"

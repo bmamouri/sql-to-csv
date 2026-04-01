@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --package sql-to-csv
+
+      - name: Strip binary
+        if: matrix.os == 'ubuntu-latest' && matrix.target != 'aarch64-unknown-linux-gnu'
+        run: strip target/${{ matrix.target }}/release/sql-to-csv
+
+      - name: Strip binary (macOS)
+        if: matrix.os == 'macos-latest'
+        run: strip target/${{ matrix.target }}/release/sql-to-csv
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../sql-to-csv-${{ matrix.target }}.tar.gz sql-to-csv
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-to-csv-${{ matrix.target }}
+          path: sql-to-csv-${{ matrix.target }}.tar.gz
+
+  generate-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate man page and completions
+        run: |
+          mkdir -p assets/man assets/completions
+          cargo run --package sql-to-csv-xtask -- generate-man assets/man
+          cargo run --package sql-to-csv-xtask -- generate-completions assets/completions
+
+      - name: Package assets
+        run: tar czf sql-to-csv-assets.tar.gz -C assets .
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-to-csv-assets
+          path: sql-to-csv-assets.tar.gz
+
+  release:
+    needs: [build, generate-assets]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/sql-to-csv-aarch64-apple-darwin/*.tar.gz
+            artifacts/sql-to-csv-x86_64-apple-darwin/*.tar.gz
+            artifacts/sql-to-csv-x86_64-unknown-linux-gnu/*.tar.gz
+            artifacts/sql-to-csv-aarch64-unknown-linux-gnu/*.tar.gz
+            artifacts/sql-to-csv-assets/*.tar.gz
+
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_ARM64=$(sha256sum artifacts/sql-to-csv-aarch64-apple-darwin/sql-to-csv-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_X86_64=$(sha256sum artifacts/sql-to-csv-x86_64-apple-darwin/sql-to-csv-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(sha256sum artifacts/sql-to-csv-aarch64-unknown-linux-gnu/sql-to-csv-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_X86_64=$(sha256sum artifacts/sql-to-csv-x86_64-unknown-linux-gnu/sql-to-csv-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+
+          # Generate formula with real hashes
+          cat > formula.rb << 'FORMULA'
+          class SqlToCsv < Formula
+            desc "Fast, parallel SQL dump to PostgreSQL CSV/TSV converter"
+            homepage "https://github.com/bmamouri/sql-to-csv"
+            license "MIT"
+            version "VERSION_PLACEHOLDER"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/bmamouri/sql-to-csv/releases/download/vVERSION_PLACEHOLDER/sql-to-csv-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_ARM64_PLACEHOLDER"
+              else
+                url "https://github.com/bmamouri/sql-to-csv/releases/download/vVERSION_PLACEHOLDER/sql-to-csv-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_X86_64_PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/bmamouri/sql-to-csv/releases/download/vVERSION_PLACEHOLDER/sql-to-csv-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_ARM64_PLACEHOLDER"
+              else
+                url "https://github.com/bmamouri/sql-to-csv/releases/download/vVERSION_PLACEHOLDER/sql-to-csv-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_LINUX_X86_64_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "sql-to-csv"
+            end
+
+            test do
+              assert_match "sql-to-csv", shell_output("#{bin}/sql-to-csv --version")
+            end
+          end
+          FORMULA
+
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" formula.rb
+          sed -i "s/SHA_ARM64_PLACEHOLDER/$SHA_ARM64/" formula.rb
+          sed -i "s/SHA_X86_64_PLACEHOLDER/$SHA_X86_64/" formula.rb
+          sed -i "s/SHA_LINUX_ARM64_PLACEHOLDER/$SHA_LINUX_ARM64/" formula.rb
+          sed -i "s/SHA_LINUX_X86_64_PLACEHOLDER/$SHA_LINUX_X86_64/" formula.rb
+
+          echo "Generated Homebrew formula for v$VERSION"
+
+          # Clone tap repo, update formula, push
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/bmamouri/homebrew-sql-to-csv.git" tap
+          mkdir -p tap/Formula
+          cp formula.rb tap/Formula/sql-to-csv.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || {
+            git commit -m "Update sql-to-csv to v$VERSION"
+            git push
+            echo "Pushed formula update to homebrew-sql-to-csv"
+          }
